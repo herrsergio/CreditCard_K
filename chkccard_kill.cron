@@ -1,0 +1,1 @@
+59 23 * * * admin /usr/bin/ph/chkccard_kill_cron.s

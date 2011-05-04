@@ -1,0 +1,564 @@
+#!/bin/ksh
+# Check status of different stuff to evaluate to block phsod
+# Return 0 if
+#	+ FMS has error transactions
+#	+ Process SYSTASK is not running
+#	+ Problem with menu updates and/or Panasonic programming
+#	+ Polling failure due to modem
+# Return 1 otherwise
+# MEXICO - LINUX change setcolor for /usr/bin/ph/setcolor
+## inicia modificacion ### mazd 020820
+## solo aplica en centros con service time  (servtm.flag existe)
+## 
+#exec > /tmp/debug.log 2>&1
+#set -x
+
+if [ -f /usr/bin/ph/tables/servtm.flag ]
+then
+   SERVTM_LOCK=/tmp/servtm.lock
+   SERVTM_LOG=/tmp/servtm.log
+   SERVTMMESSAGE=/usr/bin/ph/messages/message.servtm
+   ciclo=0
+   until [ "$bas" = "S" -o  "$bas" = "s" -o "$bas" = "n" -o "$bas" = "N" ]
+   do
+      ciclo=` expr $ciclo + 1`
+      if [ $ciclo -gt 5 ]
+      then
+         break;
+      fi
+      clear
+      ### begin service time validation
+      check_servtm.s
+      ### end service time validation
+      if [ -f $SERVTM_LOCK ] 
+      then
+         AGREGAHORA=`date +"%y%m%d %H:%M"`
+         echo "NO HAY CIERRE DE SERVICE TIME: $AGREGAHORA" >> $SERVTM_LOG
+	     /usr/bin/ph/setcolor white red
+         cat $SERVTMMESSAGE > /dev/tty
+	     if [ `tty` != "/dev/console" ]; then
+               echo "\t Aun asi, quieres dar inicio de dia AHORA (s/n) ? \c"
+	           read bas
+               case $bas in
+                 N*|n*) exit 0 ;;
+               esac;
+         fi
+	     /usr/bin/ph/setcolor white black
+      else
+         break;
+      fi
+   done
+fi
+### termina modificacion 
+
+avisarCajasCerradas()
+{
+   until [ "$bas" = "C" -o "$bas" = "c" ]
+   do
+      clear
+      setcolor white blue
+      echo "\n\n"
+      echo "\t **************************************"
+      echo "\t La caja master debe estar encendida   "
+      echo "\t y con la llave en posicion CLOSED     "
+      echo "\t **************************************"
+      echo -n "\n\n\t De \"c\" para continuar "; read bas
+   done
+}
+
+get_endstr() 
+{
+	LANG=spanish_america.ascii 		# English Language 
+	tkcurprd | awk -F: ' 
+	{
+		if ( NR == 2 ) {
+			split($2, args, " ")
+			print args[2] "\t" args[3] "\t" args[4] ":" $3
+		}
+	}'
+}
+
+get_tkprdend() 
+{
+	LANG=spanish_america.ascii 		# English Language 
+
+	tkcurprd | awk -F: ' 
+	BEGIN {
+		MONTH["Jan"] = "01"
+		MONTH["Feb"] = "02"
+		MONTH["Mar"] = "03"
+		MONTH["Apr"] = "04"
+		MONTH["May"] = "05"
+		MONTH["Jun"] = "06"
+		MONTH["Jul"] = "07"
+		MONTH["Aug"] = "08"
+		MONTH["Sep"] = "09"
+		MONTH["Oct"] = "10"
+		MONTH["Nov"] = "11"
+		MONTH["Dec"] = "12"
+	}
+	{ 
+		if ( NR == 2 ) {
+			split($2, args, " ")
+			split($4, nargs, " ")
+			if ( args[3] < 10 )
+				print nargs[2] MONTH[args[2]] "0"args[3] args[4]
+			else
+				print nargs[2] MONTH[args[2]] args[3] args[4]
+		}
+	}'
+}
+
+#################################################################
+#@desc: envia correo en caso de haber dias perdidos
+#@parm: extraData
+#################################################################
+function lostDayErrorSendMail
+{
+   CC=`getInfo.sh | cut -d"|" -f1 `
+   fecha=`date`
+   SUBJECT="Dia perdido - CC $CC - revision: ${fecha} v0.1"
+   EMAIL="quetzalcoatl.pantoja,Jesus.Noriega,MX-EquipodeSoporte,mx${CC}r"
+   #EMAIL="quetzalcoatl.pantoja"
+   mailMSG="Se encontraron dias por recuperar al dar inicio de dia en el restaurante,  por favor realizar la recuperacion de dia perdido \nen el menu principal de FMS en las siguientes opciones:\n\n q) ADMINISTRACION DEL SISTEMA \n\n\tf) Recuperacion de dia Perdido \n\ndonde se te pedira recuperar el dia perdido, para llevar a cabo la accion presiona la tecla F11 \n\nRecuerda: El no recuperar el dia perdido, puede corromper tu historia de FMS, lo que afectara tu pedido sugerido, pronostico de pedido, etc.\n"
+
+   #obtenemos la fecha del archivo sysflag.dat como base
+   sysFLDate=`sysflist | grep sysflag.dat | awk '{ print $11" "$12" "$14}'`
+   SysFD=`/bin/date.ori -d "$sysFLDate" +%y%m%d`
+   threadsholdDay=`/bin/date.ori -d "2 day ago" +%y%m%d`
+   let dayDiff=$threadsholdDay-$SysFD
+   mailMSG=$mailMSG"\nDatos adicionales:"
+   if [ "$dayDiff" -ge "0" ] ; then
+      CC_=`expr "$CC" + 0`
+      mailGte=`egrep ^$CC_ /usr/bin/ph/mngmail.txt | cut -d"|" -f2 | cut -d"@" -f1`
+      #TODO: corregir por que el cc. trae un cero de mas y no encuentra el mail del gte.
+      EMAIL=$EMAIL",$mailGte"
+      mailMSG=$mailMSG"\nSe avisa al gte. de area debido a una diferencia mayor o igual a 2 dias en el dia perdido"
+   else
+      mailMSG=$mailMSG"\nEl dia perdido es reciente, FAVOR DE RECUPERARLO"
+   fi
+   #anadimos fecha de sysflag
+   dateInSec=`sysflag -p last_date_proc`
+   mailMSG=$mailMSG"\n  Ultima fecha de sysflag: `syspdate -b $dateInSec` \n"
+   #Si hay datos extra, se cocatenan al correo
+   if [ -n "$1" ] ; then
+      mailMSG=$mailMSG"\n$1"
+   fi
+   /usr/bin/ph/jmail.s mx${CC}r "$EMAIL" "$SUBJECT" "`echo -e $mailMSG`"
+}
+
+#   MAIN
+
+TERM=AT386
+
+# Se lleva a cabo la validacion de actualizacion de recetas y programacion
+# JNR-980326.
+VAR_FILE=/usr/spool/locks/checkupd.tmp
+COMM_FILE=/usr/panpoll/commd.log
+CHECKLOG=/usr/bin/ph/messages/checkupd.log
+VALLOG=/tmp/val_err.log
+###< keep a 24 lines only logfile
+[ ! -f $VALLOG ] && echo "----------" > $VALLOG
+tail -24 $VALLOG > $VALLOG.log.sopt
+phzap mv $VALLOG.log.sopt $VALLOG
+# funcion para registrar en el log file
+tolog()
+{
+   MSG=`date +"%m%d %T";echo $1` 
+   echo $MSG >> $VALLOG
+}
+###> 
+status_prog=0
+
+##<conectividad_con_master>
+##
+TPOCENTRO=`/usr/bin/ph/getmarca.s`   # Obtiene el tipo de centro K(FC o P(H
+PHCONFG=`/usr/fms/op/bin/phconfg -n9`   # inicio de dia real es con 1
+if [ "$PHCONFG" = "1" -a "$TPOCENTRO" = "K" ]
+then
+   avisarCajasCerradas;
+   # Checa conectividad con caja master si es centro KFC y es inicio de dia
+   # y si no hubo programacion.
+   if [ ! -f $VAR_FILE ]
+   then  # como no hubo prog. checa la conectividad con la master
+      /usr/fms/op/bin/phzap /usr/fms/admin/dos/fecha.s & 
+   fi
+fi
+##</conectividad_con_master>
+
+if [ -f $VAR_FILE ]; then
+   status_var=`cat $VAR_FILE | cut -c1`
+   var_prog=0
+
+   if [ "$status_var" -ge 2 -a "$status_var" -le 4 ]; then
+      if [ -f /usr/panpoll/commd.log ]; then
+         var_prog=`awk '
+         BEGIN { flag=0 }
+
+         {
+           if ( $1 == "opening") {
+             prog = 0
+             flag = 1
+           }
+         
+         if (flag == 1){
+           if ( $1 == "DOW_PRE_ALL_PLU")
+               prog++
+            ###< 0903 no revisa que la prog. pase a las esclavas
+            ###else
+            ###if ( $1 == "DWN_ALL_PLU")
+            ###   prog++
+            ###>
+          }
+          if ( $1 == "closing")
+             flag = 0
+          ###< 0903 prog solo puede valer a lo mas 1 & 0904
+          if (prog == 1 && $1 == "POLLING" && $3 == "complete"){
+             hora=$5
+             prog +=1
+          }
+       }
+
+       END {
+           print prog
+       }' $COMM_FILE`
+
+      fi
+      ###< 0903 ahora var_prog puede valer a lo mas 2 & 0905
+      if [ "$var_prog" -ne 2 ]; then
+         status_prog=1
+      else
+         phzap touch 0229120000 /usr/panpoll/sf0001/plu.dbf
+      fi
+   fi
+
+   ciclo=0
+   ###< 0903 Agrega "S" como una opcion valida para continuar
+   until [ "$bas" = "S" -o  "$bas" = "s" -o "$bas" = "n" -o "$bas" = "N" ]
+   do
+      ciclo=` expr $ciclo + 1`
+      if [ $ciclo -gt 5 ]
+      then
+         exit 0
+      fi
+      clear
+      echo "\n\n\n"
+      if [ "$status_prog" -eq 1 ]; then
+         echo "\t No has pasado programacion o esta fallo. "
+         echo "* No has pasado programacion o esta fallo.  " >> $CHECKLOG
+         ###<0903
+      else 
+         ciclo2=0
+         until [ "$bas" = "C" -o "$bas" = "c" ]
+         do
+            ciclo2=` expr $ciclo2 + 1`
+            if [ $ciclo2 -gt 5 ]
+            then
+               break;
+            fi
+            echo "\t * * *   YA ESTA LA PROGRAMACION EN LA CAJA MASTER   * * * "
+            echo "\t Recuerda pasar prog. de la master a las demas cajas."
+            echo "\t * * *   YA ESTA LA PROGRAMACION EN LA CAJA MASTER   * * * " >> $CHECKLOG
+            echo "* Recuerda pasar prog. de la master a las demas cajas." >> $CHECKLOG
+            echo "\n\n\t De \"c\" para continuar "; read bas
+            HOY=`date +"%y%m%d %H:%M"`
+            echo "\n\n\t De \"c\" para continuar $bas ($HOY)" >> $CHECKLOG
+         done
+         ###<
+      fi
+
+      case "$status_var" in 
+         1)
+	        echo "\t En este momento se estan actualizando recetas. Es recomendable" 
+	        echo "\t esperar a que termine la actualizacion y posteriormente dar el" 
+	        echo "\t inicio de dia."
+	        echo "* En este momento se estan actualizando recetas. Es recomendable"  >> $CHECKLOG
+	        echo "* esperar a que termine la actualizacion y posteriormente dar el"  >> $CHECKLOG
+	        echo "* inicio de dia." >> $CHECKLOG
+         ;;
+         2)
+	        echo "\t Se estan actualizando recetas en este momento." 
+	        echo "* Se estan actualizando recetas en este momento." >> $CHECKLOG
+         ;;
+         5|4)
+            echo "\t La actualizacion de recetas FALLO, comunicate a sistemas."
+            echo "* La actualizacion de recetas FALLO, comunicate a sistemas." >> $CHECKLOG
+         ;;
+         3)
+            if [ "$status_prog" -ne 1 ]; then
+               phzap rm -f $VAR_FILE
+               break; 
+            fi
+      esac
+            echo "\t Aun asi, quieres dar inicio de dia AHORA (s/n) ? \c"
+	  if [ `tty` != "/dev/tty" ]; then
+	     read bas
+         HOY=`date +"%y%m%d %H:%M"`
+         echo "* Quieres dar inicio de dia ?" $bas " ($HOY)"  >> $CHECKLOG
+      fi
+   done
+   ###< 0903
+   if [ "$bas" = "n" -o "$bas" = "N" ]; then
+      exit 0
+   fi
+   echo "\n\n"
+fi
+HOY=`date +"%y%m%d %H:%M"`
+echo "* Continuo con el inicio de dia ($HOY)" >> $CHECKLOG
+
+#< mazd 02/10/17
+# intenta generar el reporte del domingo si es que no existe
+#
+. /usr/bin/ph/sysshell.new SUS
+PATH=/usr/bin/ph:$PATH; export PATH
+  ES_DOMINGO=`date +"%u"`
+  if [ "$ES_DOMINGO" = "7" -a "$PHCONFG" = "1" ]
+  then 
+     UNIT=`/usr/bin/ph/unit.s`
+     DATESIS=`/usr/bin/ph/dant.s`
+     DIA=`echo $DATESIS | cut -c7,8`
+     MES=`echo $DATESIS | cut -c4,5`
+     tolog "AVISO: hoy es domingo, mes=$MES dia=$DIA "
+     if [ "$MES" != "10"  -a "$MES" != "11"  -a "$MES" != "12" ]; then
+         MES=`echo $MES | cut -c2`; 
+     fi
+     if [ "$MES" = "10" ] ; then MES="a"; fi
+     if [ "$MES" = "11" ] ; then MES="b"; fi
+     if [ "$MES" = "12" ] ; then MES="c"; fi
+     fileNomina="0${UNIT}peh.${MES}${DIA}"
+     if [ ! -f /usr/fms/op/rpts/sdc_deh/$fileNomina ]
+     then
+         /usr/bin/ph/sdc_deh/gen_pp.s -p 2>/dev/null 
+         if [ $? -eq 0 ]; then
+            HOY=`date +"%y%m%d %H:%M"`
+            echo "OK archivo de nomina $fileNomina ($HOY)" >> $CHECKLOG
+            tolog "AVISO: ok generacion de $fileNomina el mes ($MES)"
+         else
+            HOY=`date +"%y%m%d %H:%M"`
+            echo "WARNING no se existe sdc_deh/$fileNomina ($HOY)" >> $CHECKLOG
+            tolog "WARNING: al parecer fallo generacion de $fileNomina"
+         fi
+     else
+        tolog "AVISO: salta generacion pues ya existe $fileNomina "
+     fi
+  fi
+#>
+set FMS
+. /usr/bin/ph/sysshell.new		# Load FMS environment 
+
+# Borrado de transacciones con error
+/usr/bin/ph/tkdeltrn.s
+ 
+## Chequeo del periodo de nomina
+
+prdend=`get_tkprdend`
+curdate=`date +%Y%m%d%H`
+
+if [ "$prdend" -lt "$curdate" ]; then
+    if [ `tty` != "/dev/console" ]; then
+	   echo -n "
+	   Ejecutando el cierre de nomina que termina el `get_endstr`  .... "
+    fi
+    ### tkchkcls
+	/usr/bin/ph/tkclspay.s
+	if [ $? -eq 0 ]
+	then
+       if [ `tty` != "/dev/console" ]; then
+          sleep 2
+          echo "Ok, nomina cerrada \n"
+          sleep 2
+       fi
+    else
+	   if [ `tty` != "/dev/console" ]; then
+          /usr/bin/ph/setcolor white red
+          echo "\n\tNo se pudo hacer el cierre de nomina, FAVOR DE LLAMAR A SISTEMAS " 
+          echo "\n   FECHA ACTUAL                    : `date +%b%t%d%t%H:%M`"
+          echo "   FIN DE PERIODO ACTUAL DE NOMINA : `get_endstr`"
+          echo "\n\n\tApretar ENTER o RETURN para continuar ...\n"
+          read bas
+	      /usr/bin/ph/setcolor white blue
+          echo "\n\n"
+       fi
+       exit 0
+	fi
+fi
+
+# Check if systask is running
+ps -ef | grep -v grep | grep systask > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+
+	# Verifica si falta recuperacion de dia perdido
+	systask MISSDAYS
+	ret=$?
+	echo "\n" 
+	/usr/bin/ph/setcolor white red
+	case "$ret" in
+		131)
+			echo "\n\tEl sistema FMS necesita RECUPERAR DIA PERDIDO !!"
+			# Carga Ambiente de SUS
+			set SUS
+			. /usr/bin/ph/sysshell.new SUS
+
+			if [ `/usr/fms/op/bin/phconfg -n9 -g` -eq 1 ]; then
+				/usr/bin/ph/setcolor white green 
+				echo "\n\tFavor de continuar con el INICIO DE DIA y cuando "
+				echo "\ttermine hay que RECUPERAR DIA PERDIDO "
+				if [ `tty` != /dev/console ]; then
+					echo "\n\n\tApretar ENTER o RETURN para continuar ...\n"
+					read bas
+				fi
+				/usr/bin/ph/setcolor white blue
+				echo "\n\n"
+            lostDayErrorSendMail "Se pide continuar con el inicio de dia y al terminar recuperar dia perdido"
+				exit 1
+			else
+				echo "\n\tFavor de RECUPERARLO PARA poder dar INICIO DE DIA "
+			fi
+         lostDayErrorSendMail
+			break ;;
+		0)
+			echo "\n\tEl proceso SYSTASK esta desactivado, FAVOR DE RECUPERAR DIA PERDIDO "
+			echo "\n\tpara poder dar INICIO DE DIA "
+         lostDayErrorSendMail "El proceso SYSTASK esta desactivado, se requiere recuperar dia perdido"
+			break ;;
+		*)
+			echo "\n\tProblema con SYSTASK, FAVOR DE LLAMAR A SISTEMAS"
+         lostDayErrorSendMail "Se detecto un problema con SYSTASK"
+		;;
+	esac
+	if [ `tty` != /dev/console ]; then
+		echo "\n\n\tApretar ENTER o RETURN para continuar ...\n"
+		read bas
+	fi
+	/usr/bin/ph/setcolor white blue
+	echo "\n\n"
+	exit 0
+fi
+
+#   Check payroll transactions
+#
+errmsg=`tkchktrn`
+ret=$?
+
+syspos -i getpunch >/dev/null
+users=`tkclckin | awk '{
+	if ( NR == 6 )
+		if ( $0 ~ "No hay empleados" )
+			print "NO"
+		else
+			print "SI"
+	 if ( NR >= 4 )
+	 	print $0 > "/tmp/emp_in.txt"
+}'`
+
+# Carga Ambiente de SUS
+set SUS
+. /usr/bin/ph/sysshell.new SUS
+
+if [ "`/usr/fms/op/bin/phconfg -n9 -g`" -eq 1 ]; then
+	if [ "$users" = "SI" ]; then
+		/usr/bin/ph/setcolor white red
+		echo "\n   Existen EMPLEADOS REGISTRADOS: "
+		cat /tmp/emp_in.txt
+		echo "\n   Dales Salida e intenta otra vez. "
+		if [ `tty` != /dev/console ]; then
+			echo "\n\n\tApretar ENTER o RETURN para continuar ...\n"
+			read bas
+		fi
+		/usr/bin/ph/setcolor white blue
+		echo "\n\n"
+	fi
+	if [ "$ret" -ne 0 ]; then
+		echo "\n" 
+		/usr/bin/ph/setcolor white red
+		echo "\n\tExisten TRANSACCIONES CON ERROR en NOMINA, FAVOR DE CHECAR"
+		echo "\n\t$errmsg"
+		if [ `tty` != /dev/console ]; then
+			echo "\n\n\tApretar ENTER o RETURN para continuar ...\n"
+			read bas
+		fi
+		/usr/bin/ph/setcolor white blue
+		echo "\n\n"
+		exit 0
+	fi
+fi
+
+## Si no se ha realizado el poleo/autopoleo debido a que el modem no
+## tiene tono o esta desconectado, y no es fin de semana/dia festivo,
+## entonces bloquear inicio de dia
+#
+FESTIV=/usr/bin/ph/tables/festivos.txt 
+MODSTA=/usr/bin/ph/tables/mod_stat.txt 
+hour=`date +%H`
+wday=`date +%w`
+hoy=`date +%y-%m-%d`
+if [ "$hour" -ge 6 -a "$hour" -le 11 -a "$wday" -ne 6 -a "$wday" -ne 0 ]; then
+	fest=""
+	[ -r "$FESTIV" ] && fest=`grep "$hoy" "$FESTIV"`
+	if [ -f /tmp/nopoll.flg -a -r "$MODSTA" -a "$fest" = "" ]; then
+		rmin=`date +%M`
+		rmin=`expr 15 - $rmin % 15`
+		[ "$rmin" -lt 10 ] && rmin=0$rmin
+	# MEXICO - LINUX IS NOT CHECKING THE MODEM BY NOW !!! TAKE CARE
+		#case `cat "$MODSTA"` in
+		case "ok" in
+
+		no-dialtone)
+		/usr/bin/ph/setcolor white green 
+		echo "*****************************************************"
+		echo "             O J O:     C H E C A R                  "
+		banner modem
+		echo "*****************************************************"
+		echo "*  No hay tono de linea. Por favor checa que la     *"
+		echo "*  linea telefonica del modem este bien y que este  *"
+		echo "*  conectada detras del modem donde dice \"LINE\" o   *"
+		echo "*  \"WALL\" (Vuelve a intentar en aprox $rmin minutos)   *"
+		echo "*****************************************************"
+		/usr/bin/ph/setcolor white blue
+		echo "\n\n\tApretar ENTER o RETURN para continuar ...\c"
+		read bas
+		exit 0
+		;;
+
+		no-response)
+		/usr/bin/ph/setcolor white green 
+		echo "*****************************************************"
+		echo "             O J O:     C H E C A R                  "
+		banner modem
+		echo "*****************************************************"
+		echo "*  EL MODEM NO RESPONDE. Por favor checa que el     *"
+		echo "*  modem este prendido y que el cable que va a la   *"
+		echo "*  computadora (el de enmedio) este bien conectado. *"
+		echo "*  (Vuelve a intentar en aprox $rmin minutos)          *"
+		echo "*****************************************************"
+		/usr/bin/ph/setcolor white blue
+		echo "\n\n\tApretar ENTER o RETURN para continuar ...\c"
+		read bas
+		exit 0
+		;;
+		esac
+	fi
+fi
+
+# Revisar si ya se hizo Cierre de Lote de Tarjetas de Credito
+# Si no se ha dado inicio de dia revisar
+if [ `/usr/fms/op/bin/phconfg -n9 -g` -eq 1 ]; then
+    PHPQDATE=`unset SRVR; phpqdate`
+    if [ ! -s /usr/fms/op/rpts/creditcard/`echo $PHPQDATE | cut -c1,2`-`echo $PHPQDATE | cut -c3,4`-`echo $PHPQDATE | cut -c5,6`.txt ]; then
+        echo "\n" 
+        /usr/bin/ph/setcolor white red
+        echo "\n\tNO HA HECHO SU CIERRE DE LOTE DE TARJETA DE CREDITO EN EREPORTS"
+        echo "\n\tFAVOR DE HACERLO **ANTES** DE DAR INICIO DE DIA"
+
+       if [ `tty` != /dev/console ]; then
+            echo "\n\n\tApretar ENTER o RETURN para continuar el inicio de dia...\n"
+            read bas
+       fi
+
+        /usr/bin/ph/setcolor white blue
+        echo "\n\n"
+    fi
+fi
+
+exit 1
+

@@ -1,0 +1,1 @@
+45 23 * * * admin env DISPLAY=:0.0 /usr/bin/ph/chkccard_cron.s

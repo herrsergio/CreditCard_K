@@ -1,0 +1,20 @@
+DROP TABLE ss_cat_terminals_ccard;
+
+CREATE TABLE ss_cat_terminals_ccard
+(
+  terminal_id integer NOT NULL DEFAULT 1,
+  terminal_serial_number character varying(20),
+  terminal_register_date date,
+  CONSTRAINT terminal_id_pk PRIMARY KEY (terminal_id)
+)
+WITHOUT OIDS;
+ALTER TABLE ss_cat_terminals_ccard OWNER TO postgres;
+COMMENT ON TABLE ss_cat_terminals_ccard IS 'Terminales para Tarjeta de Credito';
+
+--ALTER TABLE pp_employees ADD COLUMN security_level character varying(2);
+
+INSERT INTO ss_cat_terminals_ccard
+VALUES('1','WCAM9N834650', '2010-12-06');
+INSERT INTO ss_cat_terminals_ccard
+VALUES('2','RCFD2I653211', '2010-12-06');
+
